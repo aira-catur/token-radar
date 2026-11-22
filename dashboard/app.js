@@ -195,12 +195,12 @@
         el('td', { text: m.category }),
         el('td', { class: 'num', text: fmtX(m.multiple) }),
         el('td', { class: 'num', text: String(m.peers) }),
-        el('td', { class: 'sub', text: m.source === 'category' ? 'category median' : m.source === 'blend' ? 'shrunk toward global median' : 'global median fallback' }));
+        el('td', { class: 'sub', text: m.source === 'category' ? 'category median (5+ peers)' : 'global median fallback (under 5 peers)' }));
     });
     return el('section', { class: 'panel model' },
       el('h2', { text: 'How implied value is computed — model ' + D.model_version }),
       el('div', { class: 'formula', text: 'implied = round( TVL x category_multiple x growth_factor x maturity_factor x chain_factor )' }),
-      el('p', { class: 'sub', text: 'category_multiple: median mcap/TVL of tokenized peers in the same category, each ratio winsorized into [0.02, 2.50] so one absurd print cannot poison a category; a category needs 4+ peers for its own median; with 1-3 peers the median is shrunk toward the global median, weighted by peer count, so one lucky peer cannot set a category price; none falls back to the global median; the result is clamped to [0.05, 1.50]. Wrapped, staked and bridged products of tokens that already trade (WBTC, USDT0, canonical bridges) are excluded from the ranked board for the same reason the watchlist excludes them. growth_factor = 1 + clamp(change_7d, -40, +80)% x 0.60 (missing growth counts as 0). maturity_factor = 0.78 + min(age_days, 1825)/1825 x 0.44 (unknown age: 400-day proxy). chain_factor = 1 + min(chains - 1, 5) x 0.03. No protocol name is special-cased anywhere: one function scores every row, and each row stores its own breakdown.' }),
+      el('p', { class: 'sub', text: 'category_multiple: median mcap/TVL of tokenized peers in the same category, each ratio winsorized into [0.02, 2.50] so one absurd print cannot poison a category; a category needs at least 5 tokenized peers for its own median; with fewer than 5 its own median is not used at all and the global median prices the category instead, so one lucky peer can never set a category price; the result is clamped to [0.05, 1.50]. Wrapped, staked and bridged products of tokens that already trade (WBTC, USDT0, canonical bridges) are excluded from the ranked board for the same reason the watchlist excludes them. growth_factor = 1 + clamp(change_7d, -40, +80)% x 0.60 (missing growth counts as 0). maturity_factor = 0.78 + min(age_days, 1825)/1825 x 0.44 (unknown age: 400-day proxy). chain_factor = 1 + min(chains - 1, 5) x 0.03. No protocol name is special-cased anywhere: one function scores every row, and each row stores its own breakdown.' }),
       el('table', { class: 'mult-table' }, el('thead', null, el('tr', null, el('th', { scope: 'col', text: 'Category' }), el('th', { scope: 'col', text: 'Multiple' }), el('th', { scope: 'col', text: 'Tokenized peers' }), el('th', { scope: 'col', text: 'Derived as' }))), el('tbody', null, rows)),
       el('p', { class: 'sub', text: 'Implied value is this entry own model claim about a hypothetical launch, not a prediction that a token will exist or a price it would trade at. Protocols are described as recording no token, because the snapshot is a record, not proof.' }));
   }
@@ -224,7 +224,7 @@
       el('h3', { text: 'Model breakdown' }),
       el('div', { class: 'eq' },
         el('div', null, el('span', { text: 'TVL (snapshot)' }), el('b', { text: fmtUsd(r.tvl_usd) })),
-        el('div', null, el('span', { text: 'x category multiple (' + m.multiple_peers + (m.multiple_peers === 1 ? ' peer' : ' peers') + ', ' + (m.multiple_source === 'category' ? 'category median' : m.multiple_source === 'blend' ? 'shrunk toward global' : 'global fallback') + ')' }), el('b', { text: fmtX(m.category_multiple) })),
+        el('div', null, el('span', { text: 'x category multiple (' + m.multiple_peers + (m.multiple_peers === 1 ? ' peer' : ' peers') + ', ' + (m.multiple_source === 'category' ? 'category median' : 'global fallback, under 5 peers') + ')' }), el('b', { text: fmtX(m.category_multiple) })),
         el('div', null, el('span', { text: '= base value' }), el('b', { text: fmtUsd(m.base_value_usd) })),
         el('div', null, el('span', { text: 'x growth factor (7d ' + fmtPct(r.change_7d) + ')' }), el('b', { text: fmtX(m.growth_factor) })),
         el('div', null, el('span', { text: 'x maturity factor (age ' + fmtAge(r.age_days) + ')' }), el('b', { text: fmtX(m.maturity_factor) })),

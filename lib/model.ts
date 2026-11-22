@@ -13,9 +13,12 @@
 //    compute mcap / TVL for each, winsorize each ratio into [0.02, 2.50] so a
 //    single absurd print (a 400x prediction-market outlier, a 19x locker)
 //    cannot poison a whole category, and take the median. A category needs at
-//    least MIN_PEERS (4) tokenized peers for its own median; with fewer, the
-//    model falls back to the global winsorized median across all tokenized
-//    protocols, blended 50/50 with the category median when 1-3 peers exist.
+//    least MIN_PEERS (5) tokenized peers for its own median; with fewer than
+//    5, the category's own median is NOT used at all — the model falls back
+//    to the global winsorized median across all tokenized protocols. A
+//    category priced by one or two lucky peers is how a board ends up
+//    claiming a curator is worth 2.9x its TVL; the minimum sample exists to
+//    make that impossible.
 //    The final multiple is clamped into [0.05, 1.50]: a pre-token launch is
 //    not credibly worth more than 1.5x the TVL already locked in it, and no
 //    live category in this snapshot medians below 0.05.
@@ -74,7 +77,7 @@ const RATIO_FLOOR = 0.02;
 const RATIO_CAP = 2.5;
 const MULT_FLOOR = 0.05;
 const MULT_CAP = 1.5;
-const MIN_PEERS = 4;
+const MIN_PEERS = 5;
 const GROWTH_FLOOR = -40;
 const GROWTH_CAP = 80;
 const GROWTH_WEIGHT = 0.6;
@@ -115,13 +118,18 @@ export interface CategoryMultiple {
   category: string;
   multiple: number;
   peers: number;
-  source: 'category' | 'blend' | 'global';
+  source: 'category' | 'global';
 }
 
 /** The calibration table: one entry per category that appears on the board. */
+/** If a snapshot carried no tokenized protocol at all, calibration has no
+ *  evidence; this documented constant (near this snapshot's real global
+ *  median) is used rather than letting a median of zero values become NaN. */
+const NO_PEERS_FALLBACK = 0.2;
+
 export function calibrateMultiples(protocols: SnapshotProtocol[]): Map<string, CategoryMultiple> {
   const tokenized = protocols.filter((p) => p.mcap_usd !== null && p.mcap_usd > 0 && p.tvl_usd > 0);
-  const globalMedian = median(tokenized.map((p) => clamp(p.mcap_usd! / p.tvl_usd, RATIO_FLOOR, RATIO_CAP)));
+  const globalMedian = tokenized.length > 0 ? median(tokenized.map((p) => clamp(p.mcap_usd! / p.tvl_usd, RATIO_FLOOR, RATIO_CAP))) : NO_PEERS_FALLBACK;
   const byCategory = new Map<string, number[]>();
   for (const p of tokenized) {
     const key = p.category ?? 'Uncategorised';
@@ -138,13 +146,10 @@ export function calibrateMultiples(protocols: SnapshotProtocol[]): Map<string, C
     if (ratios.length >= MIN_PEERS) {
       multiple = median(ratios);
       source = 'category';
-    } else if (ratios.length >= 1) {
-      // Shrinkage: a category with 1-3 tokenized peers is weak evidence, so
-      // its median is weighted by its peer count against MIN_PEERS parts of
-      // the global median. One lucky peer can no longer set a category price.
-      multiple = (ratios.length * median(ratios) + MIN_PEERS * globalMedian) / (ratios.length + MIN_PEERS);
-      source = 'blend';
     } else {
+      // Minimum-sample rule: fewer than MIN_PEERS tokenized peers means the
+      // category's own median is not evidence, so it is not used — not even
+      // blended. The global winsorized median prices the category instead.
       multiple = globalMedian;
       source = 'global';
     }
@@ -365,10 +370,32 @@ function actionsFor(p: SnapshotProtocol, capital: number, chainLabel: string): C
   };
 }
 
+/** A stable per-protocol variant seed: the same slug always picks the same
+ *  plan shape, so two runs of the program write identical bytes, while
+ *  different protocols get different shapes, orders and phrasings. */
+function slugSeed(slug: string): number {
+  let h = 0;
+  for (let i = 0; i < slug.length; i++) h = (h * 31 + slug.charCodeAt(i)) % 9973;
+  return h;
+}
+
+/** Categories whose live products run points or epoch programmes a farmer
+ *  should explicitly track; the plan adds a dedicated step for them. */
+function hasPointsCulture(p: SnapshotProtocol): boolean {
+  const c = (p.category ?? '').toLowerCase();
+  return c.includes('dex') || c.includes('lend') || c.includes('derivative') || c.includes('perpetual') || c.includes('restak') || c.includes('yield') || c.includes('curator') || c.includes('allocator') || c.includes('basis');
+}
+
 /**
- * A protocol's farm plan: seven concrete steps, generated from its own
- * category, primary chain, TVL band and age. Every step carries a cost in
- * dollars computed from the primary chain's gas price and a time commitment.
+ * A protocol's farm plan, generated from its own category, primary chain,
+ * TVL band and age. The plan's SHAPE varies by protocol (a slug-seeded
+ * variant picks the step order, the phrasing bank and whether a dedicated
+ * points/epoch step is included, for 6-8 steps), because 200 identical
+ * skeletons would read as a template, not as 200 plans. Every step carries
+ * a cost in dollars computed from the primary chain's gas price and a time
+ * commitment, and the category steps describe that category's real
+ * mechanics: LP provision, borrow loops, perp volume, vault shares, basis
+ * funding, bridge routes.
  */
 export function farmSteps(p: SnapshotProtocol, age: number | null): string[] {
   const primary = p.chains.length > 0 ? p.chains[0]! : 'Ethereum';
@@ -379,15 +406,43 @@ export function farmSteps(p: SnapshotProtocol, age: number | null): string[] {
   const g = profile.gas_usd;
   const setupGas = Math.max(0.02, g * 2);
   const weeklyGas = Math.max(0.02, g * 2);
-  const steps = [
+  const variant = slugSeed(p.slug) % 3;
+
+  const setup = [
     `Set up one fresh wallet for ${p.name} only, back up its seed phrase offline, and label it with the protocol name and start date. Cost: about ${money(setupGas)} of gas for the first two transactions on ${profile.label}. Time: 10 minutes, once.`,
+    `Start with a clean wallet that has never farmed another protocol, so ${p.name} activity is attributable to one address; store the seed phrase offline. Cost: about ${money(setupGas)} of gas to activate it on ${profile.label}. Time: 10 minutes, once.`,
+    `Create a dedicated farming wallet for ${p.name} and write its address, the start date and the target hold of ${hold} days in a farm log before spending anything. Cost: about ${money(setupGas)} of gas for its first transactions on ${profile.label}. Time: 10 minutes, once.`,
+  ][variant]!;
+  const fund = [
     `Fund the wallet with ${money(capital + Math.max(5, g * 4))} of working funds on ${profile.label}: ${money(capital)} of farm capital plus a gas buffer of about ${money(Math.max(5, g * 4))}. Cost: about ${money(profile.fund_usd)} in bridge or withdrawal fees. Time: ${profile.fund_time}.`,
-    `${acts.core} Cost: ${money(capital)} of capital plus about ${money(Math.max(0.02, g * 3))} of gas for the approval and deposit transactions. Time: 20 minutes to set up.`,
-    `${acts.second} Cost: about ${money(Math.max(0.02, g * 2))} of gas on ${profile.label}. Time: 15 minutes.`,
-    `${acts.weekly} Cost: about ${money(weeklyGas)} of gas per week on ${profile.label}. Time: 15 minutes per week.`,
+    `Move ${money(capital)} of farm capital plus a ${money(Math.max(5, g * 4))} gas buffer onto ${profile.label} before touching the app, so a stuck bridge never leaves a half-open position. Cost: about ${money(profile.fund_usd)} in bridge or withdrawal fees. Time: ${profile.fund_time}.`,
+    `Get funds in place first: ${money(capital)} to deploy and about ${money(Math.max(5, g * 4))} reserved for gas on ${profile.label}. Cost: about ${money(profile.fund_usd)} in bridge or withdrawal fees. Time: ${profile.fund_time}.`,
+  ][variant]!;
+  const core = `${acts.core} Cost: ${money(capital)} of capital plus about ${money(Math.max(0.02, g * 3))} of gas for the approval and deposit transactions. Time: 20 minutes to set up.`;
+  const second = `${acts.second} Cost: about ${money(Math.max(0.02, g * 2))} of gas on ${profile.label}. Time: 15 minutes.`;
+  const weekly = `${acts.weekly} Cost: about ${money(weeklyGas)} of gas per week on ${profile.label}. Time: 15 minutes per week.`;
+  const points = `Open ${p.name}'s own points, seasons or rewards page if it runs one, screenshot the wallet's standing, and repeat that check every epoch boundary so a missed claim window never costs the whole farm. Cost: no fee to check; about ${money(Math.max(0.02, g))} of gas only if a claim transaction is needed. Time: 10 minutes per epoch.`;
+  const holdStep = [
     `Hold the position for at least ${hold} days so the activity spans several weekly snapshots, and keep a farm log with the wallet address, every transaction hash and the running total spent. Cost: the ${money(capital)} stays deployed; expected total gas over the hold is about ${money(weeklyGas * Math.ceil(hold / 7) + setupGas)}. Time: ${hold} days, checked weekly.`,
+    `Leave the ${money(capital)} deployed for a minimum of ${hold} days: snapshots and points programmes reward duration, and an early exit usually forfeits the season. Log every transaction hash as you go. Cost: expected total gas over the hold is about ${money(weeklyGas * Math.ceil(hold / 7) + setupGas)}. Time: ${hold} days, checked weekly.`,
+    `Commit to ${hold} days before entering: that is the window this plan's weekly actions are sized for, and it spans enough snapshots for the activity to count as sustained use. Cost: the ${money(capital)} stays in the position; gas over the whole hold should total about ${money(weeklyGas * Math.ceil(hold / 7) + setupGas)}. Time: ${hold} days.`,
+  ][variant]!;
+  const exit = [
     `Exit or claim only through the link on ${p.name}'s own official page, and never pay a third party to claim for you. Cost: about ${money(Math.max(0.02, g * 2))} of gas to withdraw or claim on ${profile.label}. Time: 20 minutes, at the end of the hold.`,
-  ];
+    `When the hold ends, withdraw and claim only from ${p.name}'s official page — bookmark it on day one so a search-ad clone cannot intercept the claim. Cost: about ${money(Math.max(0.02, g * 2))} of gas on ${profile.label}. Time: 20 minutes.`,
+    `Close out deliberately: repay or unwind in the reverse order you entered, then claim from the official ${p.name} page only. Cost: about ${money(Math.max(0.02, g * 2))} of gas on ${profile.label}. Time: 20 minutes, at the end of the hold.`,
+  ][variant]!;
+
+  let steps: string[];
+  if (variant === 0) {
+    steps = [setup, fund, core, second, weekly, holdStep, exit];
+  } else if (variant === 1) {
+    steps = [fund, setup, core, weekly, second, holdStep, exit];
+    if (hasPointsCulture(p)) steps.splice(4, 0, points);
+  } else {
+    steps = [setup, fund, core, second, holdStep, weekly, exit];
+    if (hasPointsCulture(p)) steps.splice(5, 0, points);
+  }
   return steps.map((s) => (s.length > 600 ? `${s.slice(0, 596)}...` : s));
 }
 
